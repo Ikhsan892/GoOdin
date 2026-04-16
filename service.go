@@ -2,11 +2,12 @@ package service
 
 import (
 	"fmt"
-	"goodin/cmd"
 	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
+
+	"goodin/cmd"
 
 	core "goodin/internal"
 
@@ -54,19 +55,14 @@ func New(config BaseConfig) *Service {
 }
 
 func (t *Service) ShutdownSignal() {
-	done := make(chan struct{}, 1)
 	// listen for interrupt signal to gracefully shutdown the application
 	go func() {
 		sigch := make(chan os.Signal, 1)
 		signal.Notify(sigch, os.Interrupt, syscall.SIGTERM)
 		<-sigch
 
-		t.Shutdown()
-
-		done <- struct{}{}
+		t.App.Stop()
 	}()
-
-	<-done
 }
 
 func (t *Service) Shutdown() {
@@ -94,6 +90,4 @@ func (t *Service) Start() {
 	if !t.TemplateConfig.DisableBanner {
 		fmt.Print(banner)
 	}
-
-	t.RootCmd.Execute()
 }

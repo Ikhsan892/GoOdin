@@ -36,6 +36,18 @@
     - [Nats CLI](#nats-cli)
     - [Jetstream CLI](#jetstream-cli-js)
   - [Additional Notes](#additional-notes)
+- [CQRS Domain Developer Guide](#cqrs-domain-developer-guide)
+  - [Creating a New Domain](#creating-a-new-domain)
+  - [Command Handler with Idempotency](#command-handler-with-idempotency)
+  - [Query Handler with Cache](#query-handler-with-cache)
+  - [Event Handler](#event-handler)
+  - [Publishing Events (Transactional Outbox)](#publishing-events-transactional-outbox)
+  - [Domain Events](#domain-events)
+  - [Idempotency](#idempotency)
+  - [HTTP Controller (Echo)](#http-controller-echo)
+  - [Registering a New Domain](#registering-a-new-domain)
+  - [Saga Pattern](#saga-pattern)
+  - [Cross-Domain Queries](#cross-domain-queries)
 - [Backend Coding Style](#backend-coding-style)
   - [Introduction](#introduction)
   - [Guidelines](#guidelines)
@@ -4504,3 +4516,631 @@ that make sense for their projects.
 
 When adding a new feature, you have to check the standard layout from NextJS
 ````
+
+---
+
+## CQRS Domain Developer Guide
+
+GoOdin uses **CQRS + Hexagonal Architecture** wired with **Uber FX**. This guide walks through creating a complete new domain from scratch, using `loyalty` as the canonical reference.
+
+### Creating a New Domain
+
+Every domain lives under `use_cases/<domain>/` and follows this fixed structure:
+
+```
+use_cases/<domain>/
+├── dto/
+│   ├── create_<domain>.go          # Command request + response structs
+│   └── get_<domain>.go             # Query request + response structs
+├── exception/
+│   └── <domain>_exception.go       # Sentinel errors for this domain
+├── domain/
+│   ├── aggregate/
+│   │   └── <domain>_aggregate.go   # Aggregate root (raises domain events)
+│   ├── entity/
+│   │   └── <entity>.go             # Core entity structs
+│   ├── event/
+│   │   └── <event_name>.go         # Domain event structs
+│   └── value_object/
+│       └── <vo>.go                 # Value objects with validation
+├── port/
+│   ├── input/
+│   │   ├── command/                # Command handler interface
+│   │   ├── query/                  # Query handler interface
+│   │   └── event/                  # Event handler interface
+│   └── output/
+│       ├── repository/             # Write + read repository interfaces
+│       ├── cache/                  # Cache repository interface
+│       └── idempotency/            # Idempotency repository interface
+├── command/
+│   └── <command>_handler.go        # Command handler implementation
+├── query/
+│   └── <query>_handler.go          # Query handler implementation
+├── event/
+│   └── on_<event>_handler.go       # Event handler implementation
+├── saga/
+│   └── <saga>_saga.go              # Saga (optional — multi-event coordination)
+└── registrar.go                    # FX composition root for this domain
+```
+
+Also create:
+
+- `repositories/<domain>_write_repository.go` — GORM write repository
+- `repositories/<domain>_read_repository.go` — GORM read repository
+- `repositories/<domain>_idempotency_repository.go` — idempotency repository
+- `gorm/models/<domain>.go` — GORM model struct
+- `pkg/events/<domain>.go` — event name constants
+- `migrations/000N_create_<domain>_table.up.sql` / `.down.sql`
+
+---
+
+### Command Handler with Idempotency
+
+Command handlers live in `use_cases/<domain>/command/`. They are **write-side** — they mutate state, publish events, and mark idempotency keys, all inside a single DB transaction.
+
+```go
+// use_cases/loyalty/command/credit_loyalty_handler.go
+package command
+
+type CreditLoyaltyHandler struct {
+    app       core.App
+    writeRepo repository.LoyaltyWriteRepository
+    idem      idempotency.IdempotencyRepository
+    eventBus  cqrs.EventBus
+}
+
+func NewCreditLoyaltyHandler(
+    app core.App,
+    writeRepo repository.LoyaltyWriteRepository,
+    idem idempotency.IdempotencyRepository,
+    eventBus cqrs.EventBus,
+) *CreditLoyaltyHandler { ... }
+
+func (h *CreditLoyaltyHandler) Handle(ctx context.Context, cmd dto.CreditLoyaltyRequest) (dto.CreditLoyaltyResponse, error) {
+    // 1. Idempotency check — skip if already processed (Watermill may replay)
+    if cmd.CausationEventID != "" {
+        if exists, _ := h.idem.Exists(ctx, cmd.CausationEventID); exists {
+            return dto.CreditLoyaltyResponse{}, exception.ErrDuplicateEvent
+        }
+    }
+
+    // 2. Load or create aggregate
+    agg, _ := h.writeRepo.FindByCustomerID(ctx, cmd.CustomerID)
+    if agg == nil {
+        agg = aggregate.NewLoyaltyAggregate(cmd.CustomerID)
+    }
+
+    // 3. Mutate aggregate (raises domain events internally)
+    agg.CreditPoints(cmd.OrderID, pts)
+
+    // 4. Save aggregate
+    h.writeRepo.Save(ctx, agg)
+
+    // 5. Publish domain events via SQL EventBus (same TX as DB write)
+    h.eventBus.Publish(ctx, envelopes...)
+
+    // 6. Mark idempotency key (same TX)
+    if cmd.CausationEventID != "" {
+        h.idem.Mark(ctx, cmd.CausationEventID)
+    }
+
+    return dto.CreditLoyaltyResponse{...}, nil
+}
+```
+
+**The contract**: steps 4, 5, and 6 must all commit in the same DB transaction. The caller (event handler or HTTP controller) is responsible for wrapping in a TX when needed.
+
+Register in `registrar.go`:
+
+```go
+cmd.RegisterHandler("loyalty.credit_loyalty", func(ctx context.Context, c cqrs.Command) (any, error) {
+    return creditHandler.Handle(ctx, c.(dto.CreditLoyaltyRequest))
+})
+```
+
+Dispatch from anywhere that has a `CommandBus`:
+
+```go
+result, err := h.commandBus.Dispatch(ctx, dto.CreditLoyaltyRequest{
+    CustomerID:       customerID,
+    OrderID:          orderID,
+    Points:           10,
+    CorrelationID:    correlationID,
+    CausationEventID: causationEventID, // event that triggered this command
+})
+```
+
+---
+
+### Query Handler with Cache
+
+Query handlers live in `use_cases/<domain>/query/`. They are **read-side** — pure reads, no side effects, never go through Watermill.
+
+```go
+// use_cases/loyalty/query/get_loyalty_balance_handler.go
+package query
+
+type GetLoyaltyBalanceHandler struct {
+    app      core.App
+    readRepo repository.LoyaltyReadRepository
+    cache    cache.LoyaltyCacheRepository
+}
+
+func (h *GetLoyaltyBalanceHandler) Handle(ctx context.Context, q dto.GetLoyaltyBalanceRequest) (dto.GetLoyaltyBalanceResponse, error) {
+    // 1. Cache lookup first
+    if cached, ok, _ := h.cache.GetBalance(ctx, q.CustomerID); ok {
+        return cached, nil
+    }
+
+    // 2. Read repository fallback
+    result, err := h.readRepo.GetBalanceByCustomerID(ctx, q.CustomerID)
+    if err != nil {
+        return dto.GetLoyaltyBalanceResponse{}, err
+    }
+
+    // 3. Populate cache for next call
+    h.cache.SetBalance(ctx, q.CustomerID, result, 5*time.Minute)
+
+    return result, nil
+}
+```
+
+Register in `registrar.go`:
+
+```go
+qry.RegisterHandler("loyalty.get_balance", func(ctx context.Context, q cqrs.Query) (any, error) {
+    return balanceHandler.Handle(ctx, q.(dto.GetLoyaltyBalanceRequest))
+})
+```
+
+Call from anywhere that has a `QueryBus`:
+
+```go
+result, err := h.queryBus.Ask(ctx, dto.GetLoyaltyBalanceRequest{CustomerID: customerID})
+balance := result.(dto.GetLoyaltyBalanceResponse)
+```
+
+---
+
+### Event Handler
+
+Event handlers live in `use_cases/<domain>/event/`. They react to **domain events published by other handlers** — the async, event-driven path through Watermill.
+
+```go
+// use_cases/loyalty/event/on_order_completed_handler.go
+package event
+
+type OnOrderCompletedHandler struct {
+    app        core.App
+    commandBus cqrs.CommandBus
+    eventBus   cqrs.EventBus
+}
+
+// Handle processes the orders.order.completed event envelope.
+func (h *OnOrderCompletedHandler) Handle(ctx context.Context, env cqrs.EventEnvelope) error {
+    // Restore OTel trace context so this handler is a child span of the publisher
+    ctx = otel.GetTextMapPropagator().Extract(ctx, propagation.MapCarrier(env.OtelCarrier))
+
+    // Type-assert the payload
+    payload, ok := env.Payload.(OrderCompletedPayload)
+    if !ok {
+        return nil // ack — don't retry malformed messages
+    }
+
+    // Dispatch a command — the command handler owns TX + idempotency + event publish
+    _, err := h.commandBus.Dispatch(ctx, dto.CreditLoyaltyRequest{
+        CustomerID:       payload.CustomerID,
+        OrderID:          payload.OrderID,
+        Points:           calculatePoints(payload.TotalAmount),
+        CorrelationID:    env.CorrelationID,
+        CausationEventID: env.EventID, // passed through for idempotency
+    })
+    if err != nil {
+        // Publish compensating event so other domains can react
+        h.eventBus.Publish(ctx, cqrs.EventEnvelope{
+            EventName: events.LoyaltyCreditFailed,
+            Payload:   event.NewLoyaltyCreditFailedEvent(...),
+        })
+        return nil // ack — compensation is in flight
+    }
+    return nil
+}
+```
+
+Register in `registrar.go`:
+
+```go
+evt.Subscribe(pkgevents.OrderCompleted, onOrderHandler)
+```
+
+Also update `pkg/events/<domain>.go` and `drivers/watermill/register.go` (see [Registering a New Domain](#registering-a-new-domain)).
+
+---
+
+### Publishing Events (Transactional Outbox)
+
+GoOdin uses the **transactional outbox pattern**: events are written to the `watermill_messages` table inside the **same DB transaction** as the business write. Watermill then forwards them to subscribers asynchronously.
+
+```go
+// Inside a command handler, after saving the aggregate:
+
+domainEvents := agg.FlushEvents()
+envelopes := make([]cqrs.EventEnvelope, 0, len(domainEvents))
+
+for _, de := range domainEvents {
+    envelopes = append(envelopes, cqrs.EventEnvelope{
+        EventID:       ulid.Make().String(),
+        CorrelationID: cmd.CorrelationID,   // propagate from the incoming command
+        CausationID:   cmd.CausationEventID, // the event that caused this command
+        EventName:     events.LoyaltyCredited,
+        OccurredAt:    de.OccurredAt(),
+        Payload:       de,
+    })
+}
+
+if err := h.eventBus.Publish(ctx, envelopes...); err != nil {
+    return dto.CreditLoyaltyResponse{}, err
+}
+```
+
+**Why this is safe**: if the DB transaction rolls back, the event rows are never committed — no ghost events, no partial state.
+
+**Event name constants** live in `pkg/events/<domain>.go`:
+
+```go
+// pkg/events/loyalty.go
+package events
+
+const (
+    // LoyaltyCredited is published after loyalty.account.credited succeeds.
+    // Publisher: use_cases/loyalty/command/credit_loyalty_handler.go
+    // Subscribers: use_cases/notification/event/..., use_cases/orders/saga/...
+    LoyaltyCredited = "loyalty.account.credited"
+
+    // LoyaltyCreditFailed is published when credit fails; compensating event.
+    LoyaltyCreditFailed = "loyalty.account.credit_failed"
+)
+```
+
+---
+
+### Domain Events
+
+Domain events are plain structs implementing `cqrs.DomainEvent`:
+
+```go
+// use_cases/loyalty/domain/event/loyalty_credited.go
+package event
+
+import "time"
+
+// LoyaltyCreditedEvent is raised when loyalty points are successfully credited.
+//
+// Published by:  use_cases/loyalty/command/credit_loyalty_handler.go
+// Subscribed by: use_cases/notification/event/on_loyalty_credited_handler.go
+//                use_cases/orders/saga/order_fulfillment_saga.go
+type LoyaltyCreditedEvent struct {
+    LoyaltyAccountID string
+    CustomerID       string
+    OrderID          string
+    PointsEarned     int
+    NewBalance       int
+    NewTier          string
+    occurredAt       time.Time
+}
+
+func NewLoyaltyCreditedEvent(accountID, customerID, orderID string, earned, newBalance int, tier string) LoyaltyCreditedEvent {
+    return LoyaltyCreditedEvent{..., occurredAt: time.Now()}
+}
+
+func (e LoyaltyCreditedEvent) EventName() string     { return "loyalty.account.credited" }
+func (e LoyaltyCreditedEvent) OccurredAt() time.Time { return e.occurredAt }
+func (e LoyaltyCreditedEvent) AggregateID() string   { return e.LoyaltyAccountID }
+```
+
+Add a compile-time assertion in the command handler:
+
+```go
+var _ cqrs.DomainEvent = (*event.LoyaltyCreditedEvent)(nil)
+```
+
+---
+
+### Idempotency
+
+Watermill may replay messages on crash or timeout. Every command handler that processes events **must** be idempotent.
+
+The pattern uses the `idempotency_keys` table and `idempotency.IdempotencyRepository`:
+
+```go
+// port/output/idempotency/idempotency_repository.go
+type IdempotencyRepository interface {
+    Exists(ctx context.Context, key string) (bool, error)
+    Mark(ctx context.Context, key string) error
+}
+```
+
+In a command handler:
+
+```go
+// Check — skip if already processed
+if cmd.CausationEventID != "" {
+    if exists, _ := h.idem.Exists(ctx, cmd.CausationEventID); exists {
+        return Response{}, exception.ErrDuplicateEvent
+    }
+}
+
+// ... do work ...
+
+// Mark — inside the same TX as the business write
+if cmd.CausationEventID != "" {
+    h.idem.Mark(ctx, cmd.CausationEventID)
+}
+```
+
+The key is `CausationEventID` — the ID of the event that triggered this command. If the same event is replayed, the `Exists` check returns `true` and the handler returns early without side effects.
+
+---
+
+### HTTP Controller (Echo)
+
+HTTP controllers live in `drivers/http/api/`. They implement `Register(*echo.Group)` which satisfies `httpdriver.EchoRoute` via structural typing — **no import of `drivers/http` needed in the controller**.
+
+```go
+// drivers/http/api/loyalty.go
+package api
+
+import (
+    "net/http"
+
+    "goodin/pkg/cqrs"
+    "goodin/use_cases/loyalty/dto"
+
+    "github.com/labstack/echo/v4"
+)
+
+type LoyaltyController struct {
+    cmd   cqrs.CommandBus
+    query cqrs.QueryBus
+}
+
+// NewLoyaltyController is the FX constructor — buses are injected automatically.
+func NewLoyaltyController(cmd cqrs.CommandBus, query cqrs.QueryBus) *LoyaltyController {
+    return &LoyaltyController{cmd: cmd, query: query}
+}
+
+// Register wires routes onto the shared /api/v1 group.
+func (h *LoyaltyController) Register(g *echo.Group) {
+    g.GET("/loyalty/balance", h.GetBalance)
+    g.POST("/loyalty/credit", h.CreditPoints)
+}
+
+// GetBalance is a one-liner — QueryBus does all the work.
+func (h *LoyaltyController) GetBalance(c echo.Context) error {
+    result, err := h.query.Ask(c.Request().Context(), dto.GetLoyaltyBalanceRequest{
+        CustomerID: c.QueryParam("customer_id"),
+    })
+    if err != nil {
+        return NewServiceError(err)
+    }
+    return NewApiResponse(result.(dto.GetLoyaltyBalanceResponse), http.StatusOK, c)
+}
+
+// CreditPoints is a one-liner — CommandBus does all the work.
+func (h *LoyaltyController) CreditPoints(c echo.Context) error {
+    var req dto.CreditLoyaltyRequest
+    if err := c.Bind(&req); err != nil {
+        return NewBadRequestError(err.Error(), nil)
+    }
+    result, err := h.cmd.Dispatch(c.Request().Context(), req)
+    if err != nil {
+        return NewServiceError(err)
+    }
+    return NewApiResponse(result.(dto.CreditLoyaltyResponse), http.StatusCreated, c)
+}
+```
+
+---
+
+### Registering a New Domain
+
+When you add a new domain, you must update **four** places:
+
+#### 1. Add event constants — `pkg/events/<domain>.go`
+
+```go
+package events
+
+const (
+    // MyDomainCreated is published after a new record is created.
+    // Publisher: use_cases/mydomain/command/create_handler.go
+    MyDomainCreated = "mydomain.record.created"
+)
+```
+
+#### 2. Add the Registrar — `use_cases/<domain>/registrar.go`
+
+```go
+package mydomain
+
+import (
+    "goodin/pkg/cqrs"
+    core "goodin/internal"
+    "goodin/repositories"
+    "goodin/use_cases/mydomain/command"
+    "goodin/use_cases/mydomain/query"
+
+    "go.uber.org/fx"
+    "gorm.io/gorm"
+)
+
+type Registrar struct {
+    app core.App
+    db  *gorm.DB
+}
+
+type Params struct {
+    fx.In
+    App core.App
+    DB  *gorm.DB `name:"gorm"`
+}
+
+func NewRegistrar(p Params) *Registrar {
+    return &Registrar{app: p.App, db: p.DB}
+}
+
+func (r *Registrar) Register(cmd cqrs.RegisterableCommandBus, qry cqrs.RegisterableQueryBus, evt cqrs.EventBus) {
+    writeRepo := repositories.NewMyDomainWriteGormRepository(r.db)
+    readRepo  := repositories.NewMyDomainReadGormRepository(r.db)
+    idemRepo  := repositories.NewIdempotencyGormRepository(r.db)
+
+    createHandler := command.NewCreateHandler(r.app, writeRepo, idemRepo, evt)
+    getHandler    := query.NewGetHandler(r.app, readRepo)
+
+    cmd.RegisterHandler("mydomain.create", func(ctx context.Context, c cqrs.Command) (any, error) {
+        return createHandler.Handle(ctx, c.(dto.CreateRequest))
+    })
+    qry.RegisterHandler("mydomain.get", func(ctx context.Context, q cqrs.Query) (any, error) {
+        return getHandler.Handle(ctx, q.(dto.GetRequest))
+    })
+    evt.Subscribe(pkgevents.SomeOtherDomainEvent, onEventHandler)
+}
+```
+
+#### 3. Register the Registrar in the Watermill module — `drivers/watermill_fx/watermill.go`
+
+```go
+var Module = fx.Module("watermill",
+    fx.Provide(
+        New,
+        AsHandler(loyalty.NewRegistrar),
+        AsHandler(mydomain.NewRegistrar), // add this line
+    ),
+)
+```
+
+#### 4. Register the HTTP controller in the HTTP module — `drivers/http/fx.go`
+
+```go
+var Module = fx.Module("echo_http",
+    fx.Provide(
+        NewEchoFX,
+        AsEchoRoute(api.NewLoyaltyController),
+        AsEchoRoute(api.NewMyDomainController), // add this line
+    ),
+)
+```
+
+#### 5. Subscribe in the non-FX watermill register (if you use `cmd/http` or `cmd/message-broker`)
+
+For the non-FX driver path, also update `drivers/watermill/register.go` to subscribe the new event handlers:
+
+```go
+// inside registerMyDomain(app, db, driver)
+evtBus.Subscribe(pkgevents.SomeOtherDomainEvent, onEventHandler)
+```
+
+---
+
+### Saga Pattern
+
+A saga coordinates work that spans **multiple events**. Use it when you need to wait for N events before proceeding (e.g., wait for both `loyalty.account.credited` AND `inventory.stock.reserved` before marking an order as fulfilled).
+
+```go
+// use_cases/orders/saga/order_fulfillment_saga.go
+package saga
+
+// FulfillmentSagaState tracks which prerequisite events have been received
+// for a given CorrelationID. Persisted to DB so progress survives restarts.
+type FulfillmentSagaState struct {
+    CorrelationID     string
+    LoyaltyCredited   bool
+    InventoryReserved bool
+    CompletedAt       *time.Time
+}
+
+type OrderFulfillmentSaga struct {
+    app      core.App
+    sagaRepo FulfillmentSagaStateRepository
+    eventBus cqrs.EventBus
+}
+
+func (s *OrderFulfillmentSaga) Handle(ctx context.Context, env cqrs.EventEnvelope) error {
+    state, _ := s.sagaRepo.FindOrCreate(ctx, env.CorrelationID)
+
+    if state.CompletedAt != nil {
+        return nil // idempotent — already completed
+    }
+
+    switch env.EventName {
+    case events.LoyaltyCredited:
+        state.LoyaltyCredited = true
+    case "inventory.stock.reserved":
+        state.InventoryReserved = true
+    }
+
+    s.sagaRepo.Save(ctx, state)
+
+    // Both prerequisites met — publish the final downstream event
+    if state.LoyaltyCredited && state.InventoryReserved {
+        now := time.Now()
+        state.CompletedAt = &now
+        s.sagaRepo.Save(ctx, state)
+
+        s.eventBus.Publish(ctx, cqrs.EventEnvelope{
+            EventID:       ulid.Make().String(),
+            CorrelationID: env.CorrelationID,
+            CausationID:   env.EventID,
+            EventName:     events.OrderFulfillmentReady,
+        })
+    }
+    return nil
+}
+```
+
+Register the saga against **both** event topics in `registrar.go`:
+
+```go
+evt.Subscribe(events.LoyaltyCredited, fulfillmentSaga)
+evt.Subscribe("inventory.stock.reserved", fulfillmentSaga)
+```
+
+---
+
+### Cross-Domain Queries
+
+When one domain needs data owned by another domain, there are three approaches:
+
+#### Option 1 — QueryBus call (synchronous, simplest)
+
+Best for: occasional reads where the other domain is always up.
+
+```go
+// In your event handler or command handler:
+result, err := h.queryBus.Ask(ctx, loyaltydto.GetLoyaltyBalanceRequest{CustomerID: customerID})
+balance := result.(loyaltydto.GetLoyaltyBalanceResponse)
+```
+
+Downside: tight temporal coupling — both domains must be healthy at query time.
+
+#### Option 2 — Direct service injection
+
+Best for: intra-process calls where domains are co-deployed. Pass the foreign `QueryBus` or repository via the registrar constructor.
+
+#### Option 3 — Denormalized read model via events (recommended for high scale)
+
+Best for: read-heavy scenarios or when domains might be split into separate services later.
+
+When `loyalty.account.credited` fires, a projection handler in the orders domain updates a local `order_summaries` table with the loyalty balance. The orders read model is always fast (local DB), eventually consistent with the loyalty write model.
+
+```go
+// use_cases/orders/event/on_loyalty_credited_handler.go
+func (h *OnLoyaltyCreditedHandler) Handle(ctx context.Context, env cqrs.EventEnvelope) error {
+    payload := env.Payload.(loyaltyevent.LoyaltyCreditedEvent)
+    // Write loyalty fields into the orders read model
+    h.orderReadRepo.UpdateLoyaltyFields(ctx, payload.OrderID, payload.NewBalance, payload.NewTier)
+    return nil
+}
+```
+
+No cross-domain query needed at read time — the data is already there.

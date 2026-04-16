@@ -10,15 +10,16 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/golang-migrate/migrate/v4"
-	"github.com/golang-migrate/migrate/v4/database/postgres"
-	"github.com/golang-migrate/migrate/v4/source/file"
 	"goodin/adapters"
 	"goodin/pkg/config"
 	"goodin/pkg/datamanager"
 	"goodin/pkg/driver"
 	"goodin/pkg/hooks"
 	"goodin/tools/logs"
+
+	"github.com/golang-migrate/migrate/v4"
+	"github.com/golang-migrate/migrate/v4/database/postgres"
+	"github.com/golang-migrate/migrate/v4/source/file"
 )
 
 var _ App = (*BaseApp)(nil)
@@ -30,6 +31,9 @@ type BaseApp struct {
 	driver *driver.Driver
 
 	mu *sync.Mutex
+
+	ctx        context.Context
+	cancelFunc context.CancelFunc
 
 	// hooks
 	onBeforeApplicationBootstrapped *hooks.Hook[BeforeApplicationBootstrapped]
@@ -99,6 +103,29 @@ func (b *BaseApp) initLogger(cfg *config.Config) *slog.Logger {
 	})
 
 	return slog.New(handler)
+}
+
+func (b *BaseApp) Context() context.Context {
+	b.mu.Lock()
+
+	defer b.mu.Unlock()
+
+	if b.ctx != nil {
+		return b.ctx
+	}
+
+	b.ctx, b.cancelFunc = context.WithCancel(context.Background())
+
+	return b.ctx
+}
+
+// Stop implements [App].
+func (b *BaseApp) Stop() {
+	if b.cancelFunc == nil {
+		return
+	}
+
+	b.cancelFunc()
 }
 
 func (b *BaseApp) Driver() *driver.Driver {

@@ -6,6 +6,7 @@ import (
 	"goodin/gorm/models"
 	"goodin/use_cases/orders/dto"
 	"goodin/use_cases/orders/port/output/repository"
+
 	"gorm.io/gorm"
 )
 
@@ -62,5 +63,20 @@ func (o *OrderGormRepository) SaveOrder(ctx context.Context, payload dto.CreateO
 		CreatedAt:    p.Created,
 		UpdatedAt:    p.Updated,
 		Items:        items,
+	}, nil
+}
+
+// FindByID implements repository.OrderRepository.
+func (o *OrderGormRepository) FindByID(ctx context.Context, orderID string) (dto.GetOrderByIDResult, error) {
+	var m models.Order
+	if err := o.db.WithContext(ctx).First(&m, "id = ?", orderID).Error; err != nil {
+		return dto.GetOrderByIDResult{}, err
+	}
+	return dto.GetOrderByIDResult{
+		Id:           m.ID,
+		CustomerName: m.CustomerName,
+		TotalAmount:  m.TotalAmount,
+		Address:      m.Address,
+		Status:       m.Status,
 	}, nil
 }

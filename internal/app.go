@@ -1,13 +1,15 @@
 package core
 
 import (
+	"context"
 	"log/slog"
 
-	"github.com/golang-migrate/migrate/v4"
 	"goodin/pkg/config"
 	"goodin/pkg/datamanager"
 	"goodin/pkg/driver"
 	"goodin/pkg/hooks"
+
+	"github.com/golang-migrate/migrate/v4"
 )
 
 // this is the base interface for application behaviour and
@@ -18,6 +20,10 @@ type App interface {
 
 	// all the configuration for this application
 	Config() config.Config
+
+	Context() context.Context
+
+	Stop()
 
 	// base logger application
 	Logger() *slog.Logger

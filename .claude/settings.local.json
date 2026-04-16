@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find:*)",
+      "Bash(go get:*)",
+      "Bash(go build:*)",
+      "Bash(go mod:*)",
+      "Bash(go vet:*)",
+      "Bash(grep -E \"^/c/Users.*service\\\\.go$|^/c/Users.*fx|^/c/Users.*app\")",
+      "Bash(xargs grep:*)",
+      "Bash(xargs ls *)"
+    ]
+  }
+}

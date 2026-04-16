@@ -10,6 +10,10 @@ func main() {
 		DisableBanner: true,
 	})
 
+	ctx := template.App.Context()
+
+	template.ShutdownSignal()
+
 	template.App.OnBeforeApplicationBootstrapped().Add("anything", func(e core.BeforeApplicationBootstrapped) error {
 		// you can add event on before application bootstrapped here
 		return nil
@@ -26,6 +30,18 @@ func main() {
 		template.App.Logger().Warn("Command not found")
 	}
 
-	// Check if application is shutdown
-	template.ShutdownSignal()
+	err := template.RootCmd.ExecuteContext(ctx)
+
+	select {
+	case <-template.App.Context().Done():
+		template.App.Logger().Info("Application killed by user (Interrupt)")
+	default:
+		if err != nil {
+			template.App.Logger().Error("Application finished with error", "err", err)
+		} else {
+			template.App.Logger().Info("Application finished successfully")
+		}
+	}
+
+	template.Shutdown()
 }
