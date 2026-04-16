@@ -1,7 +1,7 @@
 package cmd
 
 import (
-	core "mox/internal"
+	core "goodin/internal"
 
 	"github.com/spf13/cobra"
 )

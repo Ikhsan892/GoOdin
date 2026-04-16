@@ -4,11 +4,10 @@ import (
 	"context"
 	"log/slog"
 
-	"mox/pkg/config"
-	"mox/pkg/datamanager"
-	"mox/pkg/driver"
-	driverv2 "mox/pkg/driver/v2"
-	"mox/pkg/hooks"
+	"goodin/pkg/config"
+	"goodin/pkg/datamanager"
+	"goodin/pkg/driver"
+	"goodin/pkg/hooks"
 
 	"github.com/golang-migrate/migrate/v4"
 )
@@ -21,6 +20,10 @@ type App interface {
 
 	// all the configuration for this application
 	Config() config.Config
+
+	Context() context.Context
+
+	Stop()
 
 	// base logger application
 	Logger() *slog.Logger

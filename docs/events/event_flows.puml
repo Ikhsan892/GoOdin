@@ -1,0 +1,94 @@
+@startuml Full Event Topology
+!theme plain
+skinparam ArrowColor #333333
+skinparam ParticipantBackgroundColor #F0F8FF
+skinparam BoxBackgroundColor #FFFACD
+
+title GoOdin — Full Event Topology\n(Update this diagram whenever adding a new event)
+
+box "HTTP Layer" #LightBlue
+    participant "HTTP\nController" as HTTP
+end box
+
+box "Orders Domain" #LightGreen
+    participant "CreateOrder\nCommand" as ORD_CMD
+    participant "OnLoyaltyCredit\nFailedHandler" as ORD_COMP
+end box
+
+box "Loyalty Domain" #LightYellow
+    participant "OnOrderCompleted\nHandler" as LOY_EVT
+    participant "CreditLoyalty\nCommand" as LOY_CMD
+end box
+
+box "Notification Domain" #LightPink
+    participant "OnOrderCompleted\nHandler" as NOTIF_ORD
+    participant "OnLoyaltyCredited\nHandler" as NOTIF_LOY
+end box
+
+box "Saga" #LightGray
+    participant "OrderFulfillment\nSaga" as SAGA
+end box
+
+box "Shipping Domain" #Lavender
+    participant "OnFulfillmentReady\nHandler" as SHIP
+end box
+
+== Order Creation ==
+
+HTTP -> ORD_CMD : CreateOrder
+activate ORD_CMD
+ORD_CMD -> ORD_CMD : save order
+ORD_CMD --> LOY_EVT : **orders.order.completed**\n[SQL — durable]
+ORD_CMD --> NOTIF_ORD : **orders.order.completed**\n[go-channel]
+deactivate ORD_CMD
+
+== Loyalty Processing ==
+
+activate LOY_EVT
+LOY_EVT -> LOY_CMD : CreditLoyalty\ncommand dispatch
+activate LOY_CMD
+LOY_CMD -> LOY_CMD : idempotency check\nload agg → credit points\nsave → flush events
+LOY_CMD --> LOY_EVT : ok / err
+deactivate LOY_CMD
+
+alt success
+    LOY_EVT --> NOTIF_LOY : **loyalty.account.credited**\n[SQL — durable]
+    LOY_EVT --> SAGA : **loyalty.account.credited**\n[SQL — durable]
+else failure
+    LOY_EVT --> ORD_COMP : **loyalty.account.credit_failed**\n[SQL — durable]
+end
+deactivate LOY_EVT
+
+== Saga Coordination (waits for loyalty + inventory) ==
+
+activate SAGA
+SAGA -> SAGA : update saga state\n(check if both credited\n+ reserved)
+note right of SAGA
+  Also subscribes to:
+  inventory.stock.reserved
+  (add when inventory domain exists)
+end note
+
+alt both prerequisites met
+    SAGA --> SHIP : **orders.fulfillment.ready**\n[SQL — durable]
+    SAGA --> NOTIF_ORD : **orders.fulfillment.ready**\n[go-channel]
+end
+deactivate SAGA
+
+== Notification (fire-and-forget) ==
+
+activate NOTIF_ORD
+NOTIF_ORD -> NOTIF_ORD : send "order confirmed" email
+deactivate NOTIF_ORD
+
+activate NOTIF_LOY
+NOTIF_LOY -> NOTIF_LOY : send "you earned X points" email
+deactivate NOTIF_LOY
+
+== Compensation ==
+
+activate ORD_COMP
+ORD_COMP -> ORD_COMP : mark order as failed
+deactivate ORD_COMP
+
+@enduml

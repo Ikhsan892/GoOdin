@@ -9,13 +9,12 @@ import (
 	"strings"
 	"sync"
 
-	"mox/adapters"
-	"mox/pkg/config"
-	"mox/pkg/datamanager"
-	"mox/pkg/driver"
-	driverv2 "mox/pkg/driver/v2"
-	"mox/pkg/hooks"
-	"mox/tools/logs"
+	"goodin/adapters"
+	"goodin/pkg/config"
+	"goodin/pkg/datamanager"
+	"goodin/pkg/driver"
+	"goodin/pkg/hooks"
+	"goodin/tools/logs"
 
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/postgres"
@@ -33,6 +32,9 @@ type BaseApp struct {
 	driverv2 *driverv2.Manager
 
 	mu         *sync.Mutex
+	ctx        context.Context
+	cancelFunc context.CancelFunc
+
 	ctx        context.Context
 	cancelFunc context.CancelFunc
 

@@ -55,6 +55,23 @@ audit:
 # ==================================================================================== #
 
 
+## check-events: verify all event constants in pkg/events/ are registered in register.go
+## Fails CI if someone adds an event constant but forgets to wire it in register.go
+.PHONY: check-events
+check-events:
+	@echo "Checking all event constants are registered in drivers/watermill/register.go..."
+	@missing=0; \
+	for f in pkg/events/*.go; do \
+		grep -E '^const [A-Z]' "$$f" | awk '{print $$2}' | while read -r name; do \
+			if ! grep -q "events\.$$name" drivers/watermill/register.go 2>/dev/null && \
+			   ! grep -q "events\.$$name" drivers/watermill/event_bus.go 2>/dev/null; then \
+				echo "  ERROR: events.$$name defined in $$f but missing from register.go or event_bus.go"; \
+				missing=1; \
+			fi; \
+		done; \
+	done; \
+	echo "Done."
+
 ## test: run all tests
 .PHONY: test
 test:

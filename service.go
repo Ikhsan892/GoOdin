@@ -7,9 +7,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	"mox/cmd"
+	"goodin/cmd"
 
-	core "mox/internal"
+	core "goodin/internal"
 
 	"github.com/spf13/cobra"
 )
@@ -60,6 +60,7 @@ func (t *Service) ShutdownSignal() {
 		sigch := make(chan os.Signal, 1)
 		signal.Notify(sigch, os.Interrupt, syscall.SIGTERM)
 		<-sigch
+
 		t.App.Stop()
 	}()
 }

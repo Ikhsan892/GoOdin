@@ -1,0 +1,50 @@
+@startuml Order Fulfillment Flow
+!theme plain
+title Order Fulfillment — Happy Path
+
+participant "HTTP" as HTTP
+participant "orders\n(CreateOrder)" as ORD
+participant "loyalty\n(event handler)" as LOY
+participant "inventory\n(event handler)" as INV
+participant "saga\n(OrderFulfillment)" as SAGA
+participant "shipping\n(event handler)" as SHP
+participant "notification\n(event handler)" as NOTIF
+
+HTTP -> ORD : POST /orders
+ORD -> ORD : BEGIN TX\nsave order\npublish orders.order.completed to watermill_messages\nCOMMIT TX
+
+note over ORD,NOTIF
+  Watermill SQL router delivers orders.order.completed
+  to ALL subscribers concurrently (separate goroutines)
+end note
+
+par Parallel subscribers
+    ORD --> LOY : orders.order.completed
+    LOY -> LOY : BEGIN TX\nidempotency check\nload/create loyalty aggregate\ncredit points\nsave aggregate\npublish loyalty.account.credited\nmark idempotency\nCOMMIT TX\nACK message
+    LOY --> SAGA : loyalty.account.credited
+
+and
+    ORD --> INV : orders.order.completed
+    INV -> INV : BEGIN TX\nreserve stock\npublish inventory.stock.reserved\nCOMMIT TX\nACK message
+    INV --> SAGA : inventory.stock.reserved
+
+and
+    ORD --> NOTIF : orders.order.completed
+    NOTIF -> NOTIF : send "order confirmed" email\nACK message
+end
+
+note over SAGA
+  Saga persists state in DB per CorrelationID.
+  Waits until BOTH loyalty.credited AND inventory.reserved
+  are received before publishing fulfillment.ready.
+end note
+
+SAGA -> SAGA : loyalty.credited ✓\n(wait for inventory...)
+SAGA -> SAGA : inventory.reserved ✓\n(both received → publish)
+SAGA --> SHP : orders.fulfillment.ready
+SAGA --> NOTIF : orders.fulfillment.ready
+
+SHP -> SHP : create shipment record
+NOTIF -> NOTIF : send "your order is being packed" email
+
+@enduml

@@ -13,6 +13,13 @@ func main() {
 
 	template.ShutdownSignal()
 
+	template.App.OnBeforeApplicationBootstrapped().Add("anything", func(e core.BeforeApplicationBootstrapped) error {
+		// you can add event on before application bootstrapped here
+		return nil
+	})
+
+	template.ShutdownSignal()
+
 	template.Start()
 
 	if !template.RootCmd.IsAvailableCommand() {

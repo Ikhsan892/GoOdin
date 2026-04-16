@@ -56,3 +56,11 @@ type CreateOrderRepositoryResult struct {
 	CreatedAt    int64
 	UpdatedAt    int64
 }
+
+type GetOrderByIDResult struct {
+	Id           string
+	CustomerName string
+	TotalAmount  float64
+	Address      string
+	Status       string
+}
