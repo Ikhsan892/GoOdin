@@ -11,6 +11,7 @@ type GraphNode struct {
 	DependsOn  []string
 	Status     string // pending | running | completed | failed | skipped | compensated
 	Duration   time.Duration
+	Task       Task
 }
 
 func (c GraphNode) OrderingLevel(nodes map[string]GraphNode, edges [][2]string) [][]string {

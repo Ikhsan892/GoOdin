@@ -142,9 +142,11 @@ func (b *BaseApp) Driver() *driver.Driver {
 
 func (b *BaseApp) Shutdown() error {
 	if err := b.OnApplicationStop().Add("close_connection_db", func(e CloseEvent) error {
-		e.App.Data().Close("sql", func(err error) {
-			e.App.Logger().Error(err.Error())
-		})
+		if e.App.Data() != nil {
+			e.App.Data().Close("sql", func(err error) {
+				e.App.Logger().Error(err.Error())
+			})
+		}
 		return nil
 	}); err != nil {
 		return err

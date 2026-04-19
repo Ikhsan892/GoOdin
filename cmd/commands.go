@@ -10,6 +10,7 @@ func NewCommands(app core.App) []*cobra.Command {
 	rootCmd := []*cobra.Command{
 		NewAllCommand(app),
 		NewMessageBrokerCommand(app),
+		NewGraphCommand(app),
 		NewHttpCommand(app),
 		NewMigration(app),
 		newVersionCmd(app),

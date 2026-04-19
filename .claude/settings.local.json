@@ -10,5 +10,9 @@
       "Bash(xargs grep:*)",
       "Bash(xargs ls *)"
     ]
-  }
+  },
+  "enabledMcpjsonServers": [
+    "code-review-graph"
+  ],
+  "enableAllProjectMcpServers": true
 }

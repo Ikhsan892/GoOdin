@@ -1,4 +1,4 @@
-MAIN_PACKAGE_PATH := ./examples 
+MAIN_PACKAGE_PATH := ./examples
 BINARY_NAME := service
 VERSION := ${VERSION}
 DESC := Base Template Service
@@ -77,15 +77,15 @@ check-events:
 test:
 	go test -v -race -buildvcs ./...
 
-## test/service: run seperate tests 
+## test/service: run seperate tests
 .PHONY: test/service
-test/service: 
+test/service:
 	go test -v -race service
 
 ## swagger/init : run init swagger
 .PHONY: swagger/init
 swagger/init:
-	swag init -g drivers/http/echo.go 
+	swag init -g drivers/http/echo.go
 
 ## test/cover: run all tests and display coverage
 .PHONY: test/cover
@@ -96,31 +96,36 @@ test/cover:
 
 ## run/http: run the http api
 .PHONY: run/http
-run/http: 
+run/http:
 	go run examples/main.go http
 
 
 ## run/message-broker: run the message-broker system
 .PHONY: run/message-broker
-run/message-broker: 
+run/message-broker:
 	go run examples/main.go message-broker
 
 ## run/migration: run the migration
 .PHONY: run/migration
-run/migration: 
+run/migration:
 	go run examples/main.go migration up
 
 
 ## run/seeders: run the seeders
 .PHONY: run/seeders
-run/seeders: 
-	go run examples/main.go seeders 
-	
+run/seeders:
+	go run examples/main.go seeders
+
 
 ## dev: run the  application mode development
 .PHONY: run/dev
-run/dev: 
+run/dev:
 	go run examples/main.go all
+
+## dev: run the  application mode development
+.PHONY: run/graph
+run/graph:
+	go run bootstrap/main.go graph
 
 ## run/live: run the application with reloading on file changes
 .PHONY: run/live
@@ -146,7 +151,7 @@ push:
 
 ## production/deploy: deploy the application to production
 .PHONY: build
-build: 
+build:
 	@echo "Building the binary..."
 	@go get .
 	@go build -ldflags="-X ${MODULE}/pkg.Version=${VERSION}" \
@@ -179,7 +184,7 @@ production/deploy: confirm tidy audit no-dirty
 
 ## binary/windows: Create binary for windows
 .PHONY: binary/windows
-binary/windows: 
+binary/windows:
 	cd ./ui && \
 	npm run build  && \
 	cd .. && \
@@ -195,4 +200,4 @@ binary/windows/debug:
 	go build -o=${BINARY_NAME} ${MAIN_PACKAGE_PATH} && \
 	mv ./${BINARY_NAME} C:/Users/FATIHUL/Documents/pribadi/testajah/${BINARY_NAME} && \
 	echo 'Done Creating Binary for Windows'
-	
+
