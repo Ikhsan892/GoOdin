@@ -179,8 +179,9 @@ func (r *Runner) runWait(step Task) error {
 	return nil
 }
 
-// runDynamicFork resolves the task list from input params at runtime and executes them in parallel.
+// runDynamicFork fires runtime-expanded branches as goroutines and returns immediately.
 // InputParams must contain "tasks": []any, each entry a map with "name", "ref", and optional "input".
+// A later JOIN task with those refs in JoinOn is the sync point.
 func (r *Runner) runDynamicFork(step Task) error {
 	input, err := r.resolveInput(step)
 	if err != nil {
@@ -196,8 +197,6 @@ func (r *Runner) runDynamicFork(step Task) error {
 	if !ok {
 		return fmt.Errorf("[%s] dynamic_fork: 'tasks' must be a list", step.Name)
 	}
-
-	eg, egCtx := errgroup.WithContext(context.Background())
 
 	for _, td := range taskDefs {
 		tdMap, ok := td.(map[string]any)
@@ -216,27 +215,26 @@ func (r *Runner) runDynamicFork(step Task) error {
 			taskInput = params
 		}
 
-		eg.Go(func() error {
-			select {
-			case <-egCtx.Done():
-				return egCtx.Err()
-			default:
-			}
+		// Allocate channel at runtime — JOIN will read from it via JoinOn
+		r.branchDone[taskRef] = make(chan error, 1)
+
+		go func() {
 			handler, ok := r.handlers[taskName]
 			if !ok {
-				return fmt.Errorf("[%s] dynamic_fork: no handler for %q", step.Name, taskName)
+				r.branchDone[taskRef] <- fmt.Errorf("[%s] dynamic_fork: no handler for %q", step.Name, taskName)
+				return
 			}
 			output, err := handler(context.Background(), taskInput)
-			if err != nil {
-				return fmt.Errorf("[%s] dynamic_fork task %q failed: %w", step.Name, taskName, err)
+			if err == nil {
+				r.ctx.Set(taskRef, output)
+				fmt.Printf("   ✓ %s (dynamic) done\n", taskName)
 			}
-			r.ctx.Set(taskRef, output)
-			fmt.Printf("   ✓ %s (dynamic) done\n", taskName)
-			return nil
-		})
+			r.branchDone[taskRef] <- err
+		}()
 	}
 
-	return eg.Wait()
+	fmt.Printf("   ✓ %s (DYNAMIC_FORK) %d branches firing\n", step.Name, len(taskDefs))
+	return nil
 }
 
 func summarize(m map[string]any) string {

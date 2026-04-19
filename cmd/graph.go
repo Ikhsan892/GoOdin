@@ -13,13 +13,14 @@ import (
 
 // Order processing workflow:
 //
-//	validate_order (FN)
-//	  → FORK: fires check_inventory, check_payment, check_fraud in parallel
-//	  → cooldown (WAIT 500ms) — main flow keeps going while branches run
-//	  → log_step (NOOP)
-//	  → wait_checks (JOIN) — NOW blocks until all 3 checks done
-//	  → notify_parties (DYNAMIC_FORK) — runtime-expanded parallel notifications
-//	  → finalize_order (FN)
+//	validate_order      (FN)
+//	  → run_checks      (FORK)  — fires inv/pay/fraud in background, main flow continues
+//	  → cooldown        (WAIT 500ms)
+//	  → log_step        (NOOP)
+//	  → wait_checks     (JOIN)  — blocks until inv + pay + fraud all done
+//	  → notify_parties  (DYNAMIC_FORK) — fires nw/nc/nf in background
+//	  → wait_notifications (JOIN) — blocks until all 3 notify branches done
+//	  → finalize_order  (FN)
 func NewGraphCommand(app core.App) *cobra.Command {
 	var configPath string
 
@@ -82,15 +83,15 @@ func NewGraphCommand(app core.App) *cobra.Command {
 					},
 				},
 
-				// WAIT: main flow pauses 500ms (branches still running in parallel)
-				// {
-				// 	Name: "cooldown",
-				// 	Ref:  "wait_main",
-				// 	Type: coordinator.Wait,
-				// 	InputParams: map[string]any{
-				// 		"duration": "500ms",
-				// 	},
-				// },
+				// WAIT: main flow pauses 500ms (branches still running in background)
+				{
+					Name: "cooldown",
+					Ref:  "wait_main",
+					Type: coordinator.Wait,
+					InputParams: map[string]any{
+						"duration": "500ms",
+					},
+				},
 
 				// NOOP: placeholder step, no side effect
 				{
@@ -99,7 +100,15 @@ func NewGraphCommand(app core.App) *cobra.Command {
 					Type: coordinator.Noop,
 				},
 
-				// DYNAMIC_FORK: notify parties — task list built at runtime
+				// JOIN: block until all 3 check branches finish
+				{
+					Name:   "wait_checks",
+					Ref:    "join_checks",
+					Type:   coordinator.Join,
+					JoinOn: []string{"inv", "pay", "fraud"},
+				},
+
+				// DYNAMIC_FORK: notify parties — task list built at runtime, fires in background
 				// Each entry must have "name" (handler key), "ref" (ctx output key), "input" (map)
 				{
 					Name: "notify_parties",
@@ -114,13 +123,14 @@ func NewGraphCommand(app core.App) *cobra.Command {
 					},
 				},
 
-				// JOIN: block here until all 3 branch checks finish
+				// JOIN: block until all 3 dynamic notification branches finish
 				{
-					Name:   "wait_checks",
-					Ref:    "join_checks",
+					Name:   "wait_notifications",
+					Ref:    "join_notify",
 					Type:   coordinator.Join,
-					JoinOn: []string{"inv", "pay", "fraud"},
+					JoinOn: []string{"nw", "nc"},
 				},
+
 				// FN: finalize order after everything is done
 				{
 					Name: "finalize_order",
@@ -175,6 +185,7 @@ func NewGraphCommand(app core.App) *cobra.Command {
 
 			runner.Register("notify_finance", func(_ context.Context, input map[string]any) (map[string]any, error) {
 				fmt.Println("notify_finance:", input)
+				time.Sleep(10 * time.Second)
 				return map[string]any{"sent": true}, nil
 			})
 

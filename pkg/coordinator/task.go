@@ -176,6 +176,10 @@ func (t Task) processJoin(d *DAG, lastNodeIDs []string) (knitProcess, error) {
 
 	var edges [][2]string
 	for _, dep := range deps {
+		// Skip refs that aren't graph vertices — dynamic fork branches exist only at runtime
+		if _, err := d.Graph.Vertex(dep); err != nil {
+			continue
+		}
 		if err := d.Graph.AddEdge(dep, node.ID); err != nil {
 			return knitProcess{}, fmt.Errorf("add edge %s→%s: %w", dep, node.ID, err)
 		}
